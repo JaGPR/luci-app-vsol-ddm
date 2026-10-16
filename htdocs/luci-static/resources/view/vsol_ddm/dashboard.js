@@ -754,6 +754,10 @@ return view.extend({
 
 		/* ---------------- Historical Time-Series Charts (1h/6h/12h/24h) ---- */
 		var MAX_CHART_SAMPLES = 1440;
+		/* One chart point per minute, the same cadence as the backend history, so the
+		 * 1440-point buffer really holds 24 h. Between points the newest one is updated
+		 * in place, which keeps the right-hand edge of the graph live. */
+		var LIVE_SAMPLE_MS = 55 * 1000;
 		var CHART_WINDOWS = [
 			{ key: '1h', label: '1h', hours: 1, ms: 1 * 3600 * 1000 },
 			{ key: '6h', label: '6h', hours: 6, ms: 6 * 3600 * 1000 },
@@ -783,6 +787,17 @@ return view.extend({
 				}
 			}
 		}
+
+		/* Open on the smallest window covering the stored history: a few hours of data
+		 * after a reboot should fill the chart, not a sliver of a 24 h axis. */
+		(function () {
+			var first = chartHistories.rx.length ? chartHistories.rx[0].time :
+				(chartHistories.temp.length ? chartHistories.temp[0].time : null);
+			if (first === null) { activeChartWindowMs = CHART_WINDOWS[0].ms; return; }
+			var span = Date.now() - first;
+			for (var w = 0; w < CHART_WINDOWS.length; w++)
+				if (span <= CHART_WINDOWS[w].ms) { activeChartWindowMs = CHART_WINDOWS[w].ms; return; }
+		})();
 
 		var renderAllCharts = function(statusData) {
 			var th = resolveThresholds(statusData);
@@ -858,11 +873,13 @@ return view.extend({
 				var rect = canvas.getBoundingClientRect();
 				var mouseX = (ev.clientX - rect.left);
 				var nearest = null;
-				var minDist = 25;
+				var minDist = Infinity;
+				/* Snap to the reading nearest the cursor anywhere on the line. */
+				var pts = chartObj.hoverPoints || [];
 
-				if (chartObj.renderedDots && chartObj.renderedDots.length) {
-					for (var i = 0; i < chartObj.renderedDots.length; i++) {
-						var dot = chartObj.renderedDots[i];
+				if (pts.length) {
+					for (var i = 0; i < pts.length; i++) {
+						var dot = pts[i];
 						var dist = Math.abs(dot.x - mouseX);
 						if (dist < minDist) {
 							minDist = dist;
@@ -871,7 +888,8 @@ return view.extend({
 					}
 				}
 
-				if (chartObj.hoveredDot !== nearest) {
+				var prevT = chartObj.hoveredDot ? chartObj.hoveredDot.time : null;
+				if (prevT !== (nearest ? nearest.time : null)) {
 					chartObj.hoveredDot = nearest;
 					if (chartObj.lastArgs) {
 						renderChart(chartObj, chartObj.lastArgs.dataHistory, chartObj.lastArgs.thLo, chartObj.lastArgs.thHi, chartObj.lastArgs.warnLo, chartObj.lastArgs.warnHi);
@@ -1383,6 +1401,8 @@ return view.extend({
 				sum += v;
 			}
 			var avgValNum = sum / validSamples.length;
+			/* Stats describe the readings; the axis below also widens to the alarm limits. */
+			var dataMin = minVal, dataMax = maxVal;
 
 			if (chartObj.minFixed != null) minVal = Math.min(minVal, chartObj.minFixed);
 			if (chartObj.maxFixed != null) maxVal = Math.max(maxVal, chartObj.maxFixed);
@@ -1421,8 +1441,8 @@ return view.extend({
 					curEl.style.color = headerColor;
 				}
 			}
-			if (minEl) minEl.textContent = 'Min: ' + minVal.toFixed(1);
-			if (maxEl) maxEl.textContent = 'Max: ' + maxVal.toFixed(1);
+			if (minEl) minEl.textContent = 'Min: ' + dataMin.toFixed(1);
+			if (maxEl) maxEl.textContent = 'Max: ' + dataMax.toFixed(1);
 			if (avgEl) avgEl.textContent = 'Avg: ' + avgValNum.toFixed(1);
 
 			// Draw full Grafana Green, Yellow, and Red threshold background area bands
@@ -1616,8 +1636,8 @@ return view.extend({
 				ctx.stroke();
 			}
 
-			// 3. Draw consistent sample dots (spaced 30 mins apart along the recorded line)
-			var DOT_INTERVAL_MS = 30 * 60 * 1000;
+			// 3. Draw sample dots (about 60 per window: every minute on 1h, every 24 min on 24h)
+			var DOT_INTERVAL_MS = Math.max(60 * 1000, (activeChartWindowMs || 24 * 3600 * 1000) / 60);
 			var renderedDots = [];
 			var lastDotTime = -Infinity;
 
@@ -1627,7 +1647,7 @@ return view.extend({
 				var isLast = (d === validPoints.length - 1);
 				var isInterval = (pt.time - lastDotTime >= DOT_INTERVAL_MS - 60000);
 
-				if (isFirst || isInterval || (isLast && (pt.time - lastDotTime >= 10 * 60 * 1000))) {
+				if (isFirst || isInterval || (isLast && (pt.time - lastDotTime >= DOT_INTERVAL_MS / 3))) {
 					renderedDots.push({
 						x: pt.x,
 						y: pt.y,
@@ -1640,6 +1660,13 @@ return view.extend({
 			}
 
 			chartObj.renderedDots = renderedDots;
+			chartObj.hoverPoints = validPoints;
+			if (chartObj.hoveredDot) {
+				var hT = chartObj.hoveredDot.time, hNew = null;
+				for (var hp = 0; hp < validPoints.length; hp++)
+					if (validPoints[hp].time === hT) { hNew = validPoints[hp]; break; }
+				chartObj.hoveredDot = hNew;
+			}
 
 			// Draw standard dots
 			ctx.setLineDash([]);
@@ -1921,10 +1948,16 @@ return view.extend({
 			// 4. Update Time-Series Chart Data & Canvas Renderers
 			var tsNow = Date.now();
 			if (healthy) {
-				if (!isNaN(rx)) chartHistories.rx.push({ time: tsNow, val: rx });
-				if (!isNaN(tx)) chartHistories.tx.push({ time: tsNow, val: tx });
-				if (!isNaN(temp)) chartHistories.temp.push({ time: tsNow, val: temp });
-				if (!isNaN(bias)) chartHistories.bias.push({ time: tsNow, val: bias });
+				var addPoint = function (arr, v) {
+					if (isNaN(v)) return;
+					var last = arr.length ? arr[arr.length - 1] : null;
+					if (last && last.live && tsNow - last.start < LIVE_SAMPLE_MS) { last.time = tsNow; last.val = v; }
+					else arr.push({ time: tsNow, val: v, live: true, start: tsNow });
+				};
+				addPoint(chartHistories.rx, rx);
+				addPoint(chartHistories.tx, tx);
+				addPoint(chartHistories.temp, temp);
+				addPoint(chartHistories.bias, bias);
 
 				while (chartHistories.rx.length > MAX_CHART_SAMPLES) chartHistories.rx.shift();
 				while (chartHistories.tx.length > MAX_CHART_SAMPLES) chartHistories.tx.shift();
