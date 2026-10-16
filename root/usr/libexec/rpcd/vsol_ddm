@@ -92,8 +92,9 @@ get_config() {
 	case "$TIMEOUT" in
 		''|*[!0-9]*) TIMEOUT=3 ;;
 	esac
-	# Ensure socket timeout is at least 3 seconds and at most 30 seconds.
-	[ "$TIMEOUT" -lt 3 ] && TIMEOUT=3
+	# Ensure socket timeout is at least 8 seconds and at most 30 seconds: shorter
+	# limits cut the session off before the ONT has finished replying.
+	[ "$TIMEOUT" -lt 8 ] && TIMEOUT=8
 	[ "$TIMEOUT" -gt 30 ] && TIMEOUT=30
 }
 
@@ -227,7 +228,7 @@ refresh_async() {
 PARSER="/usr/share/vsol_ddm/parse.awk"
 
 # Seconds to hold the command pipe open after pipelining commands.
-READ_HOLD="0.4"
+READ_HOLD="1"
 
 # Run one telnet session against the ONT and emit the dashboard JSON.
 #
@@ -443,9 +444,9 @@ fetch_omci() {
 
 	_raw=$( {
 		printf '%s\r\n%s\r\n' "$USER" "$PASS"
-		sleep 0.2
+		sleep 1
 		printf 'omcicli mib get 11\r\nomcicli mib get 84\r\nomcicli mib get 131\r\nomcicli mib get 171\r\nomcicli mib get 329\r\nexit\r\n'
-		sleep 0.6
+		sleep 2
 	} | timeout 5 nc "$HOST" "$PORT" 2>/dev/null |
 	    tr -d '\377\376\375\374\373\372\371\r' )
 
