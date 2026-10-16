@@ -34,7 +34,7 @@ An ONT reports far more than the four numbers a typical DDM page shows. This das
 - **The OMCI managed entities, as the OLT provisioned them.** Six managed entities read straight from the ONT and rendered one card each, so the VLANs, the tagging rules and the OLT's own identity are visible without a telnet session.
 - **Twenty-four hours of history, in RAM.** A circular buffer and a background collector feed charts for receive power, transmit power, temperature and bias, with a 1h/6h/12h/24h range switcher and threshold bands drawn behind the trace.
 - **Nothing is contacted until you say what to contact.** The address and credentials have no defaults anywhere in the package; until all three are set the dashboard stays empty and no connection is attempted.
-- **Instant page load.** A cached reading paints immediately and refreshes behind the response, bounded so a link that died minutes ago cannot masquerade as healthy.
+- **Instant page load, no load on the ONT.** A background poller reads the ONT every 30 s whether or not anyone is looking; the page only reads its cache, so opening or leaving the dashboard open never starts a telnet session. A reading older than 75 s is shown as an error, so a link that died cannot masquerade as healthy.
 - **One package, every architecture.** No compiled component, so a single `.apk` installs anywhere.
 
 ## Installation
@@ -130,7 +130,7 @@ Read on demand from the ONT's own `omcicli`, one card per managed entity:
 
 Vendor identifiers arrive as four packed ASCII bytes in a hex word and are decoded beside the raw value, so `0x414c434c` also reads as `ALCL`. Administrative and operational state are printed as reported, with the ITU-T G.988 meaning stated alongside rather than translated into a coloured badge — this firmware does not report those two consistently between its ports, and a badge would have been a guess.
 
-These are provisioning state rather than telemetry: they change when the OLT reconfigures the ONT, not between polls, so they are fetched on demand and cached rather than driven from the polling loop.
+These are provisioning state rather than telemetry: they change when the OLT reconfigures the ONT, not between polls, so the background poller reads them only when the cache is missing or a day old, and the dashboard shows the cached copy.
 
 ### Restarting the ONT
 
@@ -150,7 +150,7 @@ Settings survive both package upgrade (`conffiles`) and firmware reflash (`/lib/
 
 The backend is shell and `awk`. `/usr/libexec/rpcd/vsol_ddm` opens one telnet session to the ONT with BusyBox `nc`, pipelines every diagnostic command into it, strips the telnet control bytes, and hands the transcript to `/usr/share/vsol_ddm/parse.awk`, which emits the dashboard JSON.
 
-Commands are pipelined rather than issued one at a time because the ONT accepts only about **two concurrent telnet sessions** — a third connect times out. Two browser tabs polling independently were enough to starve any other caller and produce a spurious "unreachable" against a perfectly healthy ONT. Device access is therefore serialised behind a lock, and callers arriving during an in-flight query collapse onto its result rather than opening another session.
+Commands are pipelined rather than issued one at a time because the ONT accepts only about **two concurrent telnet sessions** — a third connect times out. Two browser tabs polling independently were enough to starve any other caller and produce a spurious "unreachable" against a perfectly healthy ONT. Device access is therefore left to a single background poller; the dashboard only reads what it cached, so any number of open tabs costs the ONT nothing extra.
 
 The OMCI read is a second, separate session at the ONT's top-level CLI prompt, where `omcicli` lives, rather than the diagnostic shell the telemetry path enters. Its output needs real parsing rather than field scraping: instances are delimited by runs of `=`, every line is separated by a blank one, ME 171 nests a repeating filter and treatment table, and some fields carry raw bytes rather than text — the `Version` field on this firmware is `0x06 0x02 0x04`, which would otherwise emit control characters into the JSON. `/usr/share/vsol_ddm/omci.awk` handles the structure and sanitises to printable ASCII, walking the string because BusyBox `awk` rejects octal ranges inside bracket expressions. It produces identical output under gawk, mawk and BusyBox awk.
 

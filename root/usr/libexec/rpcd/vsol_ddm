@@ -7,30 +7,23 @@
 # are therefore enough to starve any other caller, which surfaced as a spurious
 # "timed out or unreachable" even though the ONT was perfectly healthy.
 #
-# Every device query is consequently serialised behind a lock, and the cache is
-# re-checked once the lock is held: concurrent callers collapse onto a single
-# telnet session and then all read the same fresh result.
+# Only the background poller (run_daemon) queries the ONT; the dashboard reads
+# its cache. However many tabs are open, the ONT sees one telemetry session per
+# poll, and opening the page never starts a session of its own. Queries still
+# take a lock so an explicit Test Connection cannot overlap the poller.
 
 UCI_CONFIG="vsol_ddm"
 CACHE_FILE="/tmp/vsol_ddm_cache.json"
 LOCK_FILE="/tmp/vsol_ddm.lock"
 
-# Serving the dashboard from cache for the length of one poll interval keeps a
-# single viewer to one telnet session per poll instead of one per request.
-CACHE_TTL=2
+# The background poller (run_daemon) is the only thing that talks to the ONT.
+# The dashboard reads what it last stored, so opening the page -- or leaving it
+# open -- never starts a telnet session of its own. Everything stays in /tmp.
+POLL_EVERY=30
 
-# Instant-load window.
-#
-# Opening the LuCI page should paint immediately rather than waiting out a telnet
-# round trip, so a cache entry older than CACHE_TTL is still served at once and a
-# refresh is kicked off in the background for the next poll.
-#
-# That trade is only safe while it stays bounded. Serving arbitrarily old data
-# would mean an ONT that died ten minutes ago still renders as a healthy link --
-# the same "failure disguised as data" this backend exists to avoid. Past
-# MAX_STALE the shortcut is abandoned and the caller waits for a real answer, so
-# a genuinely dead device surfaces as an error rather than as stale telemetry.
-MAX_STALE=30
+# A reading older than this is reported as an error rather than shown as a live
+# link: one missed poll is tolerated, a dead ONT surfaces within about a minute.
+MAX_STALE=75
 
 # Upper bound on how long a caller waits for an in-flight query, where the flock
 # implementation supports a timeout at all. Comfortably above the query time.
@@ -174,10 +167,31 @@ get_history() {
 	printf ']}\n'
 }
 
+# One poll: query the ONT under the lock and store a successful result in the
+# cache (and history). A failed query stores nothing, so the cache ages and the
+# dashboard reports the failure once it passes MAX_STALE.
+poll_device() {
+	get_config
+	is_configured || return 0
+	[ "$ENABLED" = "1" ] || return 0
+	[ -f "$PARSER" ] || return 0
+	if [ "$HAVE_FLOCK" = "1" ]; then
+		exec 9>"$LOCK_FILE"
+		take_lock
+	fi
+	store_result "$(do_query)"
+	if [ "$HAVE_FLOCK" = "1" ]; then
+		flock -u 9 2>/dev/null
+		exec 9>&-
+	fi
+	# OMCI is configuration, not telemetry: read only when missing or a day old.
+	fetch_omci refresh >/dev/null 2>&1
+}
+
 run_daemon() {
 	while true; do
-		fetch_telemetry >/dev/null 2>&1
-		sleep 60
+		poll_device >/dev/null 2>&1
+		sleep "$POLL_EVERY"
 	done
 }
 
@@ -205,24 +219,6 @@ store_result() {
 			;;
 	esac
 	return 1
-}
-
-# Refresh the cache without the caller waiting for it.
-#
-# Detached from rpcd's stdout: leaving the inherited descriptor open would make
-# ubus wait for this child before returning the response, which is exactly the
-# delay the background refresh exists to remove. The non-blocking lock means a
-# refresh already in flight is left to finish rather than starting a second
-# telnet session alongside it.
-refresh_async() {
-	(
-		exec >/dev/null 2>&1 </dev/null
-		if [ "$HAVE_FLOCK" = "1" ]; then
-			exec 9>"$LOCK_FILE"
-			flock -n 9 || exit 0
-		fi
-		store_result "$(do_query)"
-	) &
 }
 
 PARSER="/usr/share/vsol_ddm/parse.awk"
@@ -289,7 +285,8 @@ do_query() {
 		-f "$PARSER"
 }
 
-fetch_telemetry() {
+# Answer the dashboard from the poller's cache only; never contacts the ONT.
+read_status() {
 	get_config
 
 	is_configured || { unconfigured_json; return; }
@@ -299,71 +296,18 @@ fetch_telemetry() {
 		return
 	fi
 
-	# Fast path: fresh cache, no lock needed.
-	if cache_fresh "$CACHE_TTL"; then
-		cat "$CACHE_FILE"
-		return
-	fi
-
-	if [ ! -f "$PARSER" ]; then
-		printf '{"success": false, "connected": false, "host": "%s", "error": "parser %s is missing from the installation"}\n' "$HOST" "$PARSER"
-		return
-	fi
-
-	# Instant load: within the bounded staleness window, answer from cache right
-	# away and refresh behind the response. The page paints on the cached values
-	# and the next poll picks up the fresh ones.
 	if cache_fresh "$MAX_STALE"; then
 		cat "$CACHE_FILE"
-		refresh_async
 		return
 	fi
 
-	RES=""
-	GOT_LOCK=0
-	if [ "$HAVE_FLOCK" = "1" ]; then
-		# Serialise device access. Under the lock, re-check the cache: if another
-		# caller refreshed it while we waited, reuse that instead of opening a
-		# second telnet session for the same data.
-		exec 9>"$LOCK_FILE"
-		if take_lock; then
-			GOT_LOCK=1
-			if cache_fresh "$CACHE_TTL"; then
-				cat "$CACHE_FILE"
-				flock -u 9 2>/dev/null
-				exec 9>&-
-				return
-			fi
-			RES=$(do_query)
-			flock -u 9 2>/dev/null
-		fi
-		exec 9>&-
-	fi
-
-	# No lock support, or the lock could not be taken. Query anyway: an unavailable
-	# lock is a statement about this script, not about the ONT, and reporting it as
-	# a device failure would be a lie.
-	if [ "$GOT_LOCK" != "1" ] && [ -z "$RES" ]; then
-		RES=$(do_query)
-	fi
-
-	if [ -n "$RES" ] && store_result "$RES"; then
-		echo "$RES"
-		return
-	fi
-
-	# The query failed and control only reaches here when the cache was already
-	# older than MAX_STALE -- anything newer was served by the instant-load path
-	# above, which is what absorbs an isolated dropped poll. Replaying a cache
-	# that old would render a link that has been down for minutes as healthy, so
-	# the failure is reported instead. The dashboard shows an error banner rather
-	# than telemetry that is no longer true.
-	if [ -n "$RES" ]; then
-		# The helper produced its own structured error; pass it through verbatim.
-		echo "$RES"
+	if [ -f "$CACHE_FILE" ]; then
+		_age=$(( $(date +%s) - $(date -r "$CACHE_FILE" +%s) ))
+		printf '{"success": false, "connected": false, "host": "%s", "error": "No answer from the ONT at %s:%s for %s s (background poller)"}\n' \
+			"$HOST" "$HOST" "$PORT" "$_age"
 	else
-		printf '{"success": false, "connected": false, "host": "%s", "error": "Unable to connect or authenticate to VSOL ONT at %s:%s"}\n' \
-			"$HOST" "$HOST" "$PORT"
+		printf '{"success": false, "connected": false, "host": "%s", "error": "Waiting for the first reading from the background poller (every %s s)"}\n' \
+			"$HOST" "$POLL_EVERY"
 	fi
 }
 
@@ -442,6 +386,12 @@ fetch_omci() {
 		return
 	fi
 
+	# Only the background poller (fetch_omci refresh) talks to the ONT.
+	if [ "$1" != "refresh" ]; then
+		printf '{"success": false, "connected": true, "host": "%s", "error": "OMCI not read yet; the background poller collects it within a minute"}\n' "$HOST"
+		return
+	fi
+
 	_raw=$( {
 		printf '%s\r\n%s\r\n' "$USER" "$PASS"
 		sleep 1
@@ -508,7 +458,7 @@ case "$1" in
 	call)
 		case "$2" in
 			get_status|get_info)
-				fetch_telemetry
+				read_status
 				;;
 			get_history)
 				get_history
