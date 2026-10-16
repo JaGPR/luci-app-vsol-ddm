@@ -11,6 +11,13 @@ Optical diagnostics for the VSOL V2802RH XPON ONT and other Realtek-based XPON O
 
 </div>
 
+> **Fork of [AliLostInTheDark/luci-app-vsol-ddm](https://github.com/AliLostInTheDark/luci-app-vsol-ddm)** (Apache-2.0), modified by Jagpreet Singh. Changes on top of upstream:
+> - whole-second sleeps so telemetry is complete on BusyBox (fractional `sleep` fails there),
+> - a background poller is the only thing that contacts the ONT; the page reads its cache,
+> - charts keep 24 h of history, open on the range that fits, hover snaps to any reading, Min/Max show real readings.
+>
+> The install commands below fetch the **upstream** release, which does not include these changes. To run this fork, copy `root/usr/libexec/rpcd/vsol_ddm` and `htdocs/luci-static/resources/view/vsol_ddm/dashboard.js` over an installed copy and run `/etc/init.d/vsol_ddm restart`.
+
 ---
 
 An ONT reports far more than the four numbers a typical DDM page shows. This dashboard reads the optical power budget, the transceiver's own identity, the OMCI activation state machine, the T-CONT and GEM port allocations, and the Ethernet counters — and it refuses to display anything the hardware did not actually report.
