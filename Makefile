@@ -28,7 +28,7 @@ define Package/luci-app-vsol-ddm
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=VSOL V2802RH Optical Diagnostics & DDM Monitor
-  DEPENDS:=+luci-base
+  DEPENDS:=+luci-base +coreutils-timeout
   PKGARCH:=all
 endef
 
