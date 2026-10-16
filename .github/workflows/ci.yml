@@ -31,6 +31,8 @@ jobs:
           files="
             root/usr/libexec/rpcd/vsol_ddm
             root/etc/uci-defaults/80_luci-app-vsol-ddm
+            install.sh
+            uninstall.sh
           "
           for f in $files; do
             [ -f "$f" ] || { echo "missing: $f"; exit 1; }
@@ -44,7 +46,7 @@ jobs:
         run: |
           shellcheck -s sh -S warning \
             root/usr/libexec/rpcd/vsol_ddm \
-            root/etc/uci-defaults/80_luci-app-vsol-ddm || true
+            root/etc/uci-defaults/80_luci-app-vsol-ddm \n            install.sh uninstall.sh || true
 
   awk:
     name: Telemetry parser

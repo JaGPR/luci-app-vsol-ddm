@@ -14,9 +14,16 @@ Optical diagnostics for the VSOL V2802RH XPON ONT and other Realtek-based XPON O
 > **Fork of [AliLostInTheDark/luci-app-vsol-ddm](https://github.com/AliLostInTheDark/luci-app-vsol-ddm)** (Apache-2.0), modified by Jagpreet Singh. Changes on top of upstream:
 > - whole-second sleeps so telemetry is complete on BusyBox (fractional `sleep` fails there),
 > - a background poller is the only thing that contacts the ONT; the page reads its cache,
-> - charts keep 24 h of history, open on the range that fits, hover snaps to any reading, Min/Max show real readings.
+> - charts keep 24 h of history, open on the range that fits, hover snaps to any reading, Min/Max show real readings,
+> - declares the `coreutils-timeout` dependency the backend needs.
 >
-> The install commands below fetch the **upstream** release, which does not include these changes. To run this fork, copy `root/usr/libexec/rpcd/vsol_ddm` and `htdocs/luci-static/resources/view/vsol_ddm/dashboard.js` over an installed copy and run `/etc/init.d/vsol_ddm restart`.
+> **Install this fork** (as root on the router; also works over an installed upstream package):
+>
+> ```sh
+> wget -qO /tmp/install.sh https://raw.githubusercontent.com/JaGPR/luci-app-vsol-ddm/main/install.sh && sh /tmp/install.sh
+> ```
+>
+> `DRY_RUN=1 sh /tmp/install.sh` shows every step without changing anything. Remove with `uninstall.sh` (`KEEP_CONFIG=1` keeps your settings). The **Installation** section further down describes the upstream signed release, which does not include these changes.
 
 ---
 
